@@ -1,0 +1,632 @@
+#!/usr/bin/env python3
+"""
+Pokémon: Black & White 3 — Shadows of Unova
+Text-based, choice-driven, modular single-file game.
+
+Drop-in extension points:
+ - Add new Pokemon to POKEDEX
+ - Add new Moves to MOVESET
+ - Add new routes/trainers to WORLD
+ - Expand story scenes in Story class or map
+
+Save file: bw3_save.json
+"""
+
+import json
+import random
+import os
+import sys
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+
+SAVE_FILE = "bw3_save.json"
+VERSION = "0.9 - Shadows of Unova (Text Demo)"
+
+# -------------------------
+# Data definitions
+# -------------------------
+
+@dataclass
+class Move:
+    name: str
+    power: int
+    accuracy: int  # 0-100
+    pp: int
+    type: str = "Normal"
+    priority: int = 0
+    description: str = ""
+
+@dataclass
+class Pokemon:
+    species: str
+    level: int
+    max_hp: int
+    hp: int
+    atk: int
+    defense: int
+    sp_atk: int
+    sp_def: int
+    speed: int
+    types: List[str]
+    moves: List[Move] = field(default_factory=list)
+    status: Optional[str] = None
+
+    def is_fainted(self):
+        return self.hp <= 0
+
+    def heal_full(self):
+        self.hp = self.max_hp
+        self.status = None
+        for m in self.moves:
+            pass  # PP tracking could be added
+
+    def take_damage(self, dmg:int):
+        self.hp -= dmg
+        if self.hp < 0:
+            self.hp = 0
+
+    def stat_line(self):
+        return f"{self.species} L{self.level} HP:{self.hp}/{self.max_hp} Status:{self.status or 'OK'}"
+
+@dataclass
+class Player:
+    name: str
+    gender: str
+    money: int = 3000
+    badges: List[str] = field(default_factory=list)
+    party: List[Pokemon] = field(default_factory=list)
+    bag: Dict[str,int] = field(default_factory=lambda: {"Potion":5, "Antidote":1})
+    location: str = "Aspertia City"
+    play_time_minutes: int = 0
+
+    def has_usable_pokemon(self):
+        return any(not p.is_fainted() for p in self.party)
+
+# -------------------------
+# Small Pokedex and Moveset
+# (Simplified — expand as desired)
+# -------------------------
+
+# Basic moves
+MOVESET: Dict[str, Move] = {
+    "Tackle": Move("Tackle", power=40, accuracy=100, pp=35, type="Normal", description="A basic physical attack."),
+    "Vine Whip": Move("Vine Whip", power=45, accuracy=100, pp=25, type="Grass"),
+    "Ember": Move("Ember", power=40, accuracy=100, pp=25, type="Fire"),
+    "Water Gun": Move("Water Gun", power=40, accuracy=100, pp=25, type="Water"),
+    "Quick Attack": Move("Quick Attack", power=40, accuracy=100, pp=30, type="Normal", priority=1),
+    "Tail Whip": Move("Tail Whip", power=0, accuracy=100, pp=30, type="Normal", description="Lowers opponent defense (not implemented)."),
+    "Leer": Move("Leer", power=0, accuracy=100, pp=30, type="Normal"),
+    "Razor Leaf": Move("Razor Leaf", power=55, accuracy=95, pp=25, type="Grass"),
+    "Flame Charge": Move("Flame Charge", power=50, accuracy=100, pp=20, type="Fire"),
+    "Aqua Jet": Move("Aqua Jet", power=40, accuracy=100, pp=20, type="Water", priority=1),
+}
+
+# Small pokedex: species mapped to base stats (simplified)
+POKEDEX: Dict[str, Dict] = {
+    "Snivy": {"types":["Grass"], "hp":45, "atk":45, "def":55, "sp_atk":45, "sp_def":55, "speed":63, "moves":["Tackle","Vine Whip","Leer","Razor Leaf"]},
+    "Tepig": {"types":["Fire"], "hp":65, "atk":63, "def":45, "sp_atk":45, "sp_def":45, "speed":45, "moves":["Tackle","Ember","Tail Whip","Flame Charge"]},
+    "Oshawott": {"types":["Water"], "hp":55, "atk":55, "def":45, "sp_atk":63, "sp_def":45, "speed":45, "moves":["Tackle","Water Gun","Leer","Aqua Jet"]},
+    "Pidove": {"types":["Normal","Flying"], "hp":50, "atk":55, "def":50, "sp_atk":36, "sp_def":30, "speed":43, "moves":["Tackle","Quick Attack"]},
+    "Patrat": {"types":["Normal"], "hp":45, "atk":55, "def":39, "sp_atk":35, "sp_def":39, "speed":42, "moves":["Tackle","Leer"]},
+    "Purrloin": {"types":["Dark"], "hp":41, "atk":50, "def":37, "sp_atk":50, "sp_def":37, "speed":66, "moves":["Tackle","Quick Attack"]},
+    # add more...
+}
+
+# -------------------------
+# World (routes, NPCs, trainers)
+# -------------------------
+WORLD = {
+    "Aspertia City": {
+        "desc": "A small town where your adventure begins. The Academy stands proud nearby.",
+        "exits": ["Route 1"]
+    },
+    "Route 1": {
+        "desc": "First route out of Aspertia. Tall grass, a few trainers, and wild Pokemon.",
+        "exits": ["Aspertia City", "Nuvema Town"]
+    },
+    "Nuvema Town": {
+        "desc": "A quiet coastal village. Rumors of unusual Team Plasma activity drift here.",
+        "exits": ["Route 1", "Route 2"]
+    },
+    # Expand with towns, cities, caves...
+}
+
+TRAINERS = {
+    "Route 1 - Youngster": {
+        "name": "Youngster Josh",
+        "party": [("Patrat", 5)]
+    },
+    "Nuvema - Rival": {
+        "name": "Rival Cheren",
+        "party": [("Pidove", 6)]
+    }
+}
+
+# -------------------------
+# Utility functions
+# -------------------------
+
+def clamp(n, a, b):
+    return max(a, min(b, n))
+
+def choose_number(prompt, low, high):
+    while True:
+        try:
+            choice = input(f"{prompt} [{low}-{high}]: ").strip()
+            if choice.lower() in ("q","quit","exit"):
+                sys.exit(0)
+            num = int(choice)
+            if low <= num <= high:
+                return num
+        except Exception:
+            pass
+        print(f"Please enter a number between {low} and {high}.")
+
+def rand_choice_weighted(options):
+    total = sum(w for (item,w) in options)
+    r = random.uniform(0, total)
+    upto = 0
+    for item,w in options:
+        if upto + w >= r:
+            return item
+        upto += w
+    return options[-1][0]
+
+# -------------------------
+# Pokemon factory & leveling
+# -------------------------
+
+def make_pokemon(species:str, level:int) -> Pokemon:
+    base = POKEDEX.get(species)
+    if not base:
+        raise ValueError(f"No such pokemon {species}")
+    # Simplified stat scaling: base * (1 + level/50)
+    scale = 1 + (level - 1) / 50
+    hp = int(base["hp"] * scale) + 5
+    atk = int(base["atk"] * scale)
+    defense = int(base["def"] * scale)
+    sp_atk = int(base["sp_atk"] * scale)
+    sp_def = int(base["sp_def"] * scale)
+    speed = int(base["speed"] * scale)
+    moves = []
+    for mv in base["moves"][:4]:
+        move = MOVESET.get(mv)
+        if move:
+            moves.append(move)
+    return Pokemon(species=species, level=level, max_hp=hp, hp=hp, atk=atk, defense=defense, sp_atk=sp_atk, sp_def=sp_def, speed=speed, types=base["types"], moves=moves)
+
+# -------------------------
+# Simple battle engine
+# -------------------------
+
+TYPE_EFFECTIVENESS = {
+    # simple table for Grass, Fire, Water
+    ("Fire","Grass"): 2.0,
+    ("Fire","Water"): 0.5,
+    ("Water","Fire"): 2.0,
+    ("Water","Grass"): 0.5,
+    ("Grass","Water"): 2.0,
+    ("Grass","Fire"): 0.5,
+}
+
+def type_multiplier(move_type, target_types):
+    mult = 1.0
+    for t in target_types:
+        mult *= TYPE_EFFECTIVENESS.get((move_type, t), 1.0)
+    return mult
+
+def compute_damage(attacker:Pokemon, defender:Pokemon, move:Move):
+    # Simple damage formula
+    if move.power <= 0:
+        return 0
+    # choose attack stat by move type: physical for now
+    attack = attacker.atk
+    defense = defender.defense
+    base = (((2 * attacker.level / 5) + 2) * move.power * (attack / max(1, defense))) / 50 + 2
+    # type effectiveness
+    mult = type_multiplier(move.type, defender.types)
+    # random factor
+    rnd = random.uniform(0.85, 1.0)
+    dmg = int(base * mult * rnd)
+    return max(1, dmg)
+
+class Battle:
+    def __init__(self, player:Player, enemy_party:List[Pokemon], enemy_name="Wild Pokemon", trainer_mode=False):
+        self.player = player
+        self.enemy_party = enemy_party
+        self.enemy_name = enemy_name
+        self.trainer_mode = trainer_mode
+
+    def start(self):
+        print(f"\n=== BATTLE START: {self.enemy_name} ===")
+        # find first enemy and first player pokemon
+        player_pokemon = self.choose_first_usable(self.player.party)
+        enemy_pokemon = self.choose_first_usable(self.enemy_party)
+        if not player_pokemon or not enemy_pokemon:
+            print("No Pokemon to battle.")
+            return False
+        while True:
+            if player_pokemon.is_fainted():
+                print(f"{player_pokemon.species} fainted!")
+                player_pokemon = self.choose_first_usable(self.player.party)
+                if not player_pokemon:
+                    print("All your Pokemon fainted! You blacked out...")
+                    return False
+                print(f"You sent out {player_pokemon.species}!")
+            if enemy_pokemon.is_fainted():
+                print(f"The opposing {enemy_pokemon.species} fainted!")
+                # switch to next enemy or end
+                enemy_pokemon = self.choose_first_usable(self.enemy_party)
+                if not enemy_pokemon:
+                    print("You won the battle!")
+                    return True
+                print(f"The enemy sent out {enemy_pokemon.species}!")
+            # Turn selection
+            print("\n--- Battle Menu ---")
+            print(f"Your active: {player_pokemon.stat_line()}")
+            print(f"Enemy active: {enemy_pokemon.stat_line()}")
+            print("1) Fight")
+            print("2) Bag")
+            print("3) Pokemon")
+            print("4) Run" + (" (Cannot run from trainers)" if self.trainer_mode else ""))
+            choice = choose_number("Choose action", 1, 4)
+            if choice == 1:
+                # Fight -> pick move
+                self.do_fight_turn(player_pokemon, enemy_pokemon)
+                # check faint after turn handled in loop
+            elif choice == 2:
+                self.open_bag(player_pokemon)
+            elif choice == 3:
+                player_pokemon = self.switch_pokemon(player_pokemon)
+            elif choice == 4:
+                if self.trainer_mode:
+                    print("You can't run from a trainer battle!")
+                else:
+                    if random.random() < 0.7:
+                        print("You fled from battle.")
+                        return True
+                    else:
+                        print("Couldn't get away!")
+            # continue loop
+
+    def choose_first_usable(self, party):
+        for p in party:
+            if not p.is_fainted():
+                return p
+        return None
+
+    def do_fight_turn(self, player_pokemon, enemy_pokemon):
+        # choose player's move
+        print("\nChoose a move:")
+        for i,m in enumerate(player_pokemon.moves, start=1):
+            print(f"{i}) {m.name} (Power:{m.power} PP:{m.pp})")
+        mv_choice = choose_number("Move", 1, len(player_pokemon.moves))
+        move = player_pokemon.moves[mv_choice-1]
+        # enemy AI chooses random move
+        enemy_move = random.choice(enemy_pokemon.moves) if enemy_pokemon.moves else Move("Struggle",40,100,1)
+        # Determine order by priority then speed
+        player_priority = move.priority
+        enemy_priority = enemy_move.priority
+        first, second = ("player","enemy") if (player_priority > enemy_priority or (player_priority==enemy_priority and player_pokemon.speed >= enemy_pokemon.speed)) else ("enemy","player")
+        # action execution helper
+        def do_action(actor, mv, target):
+            # accuracy check
+            if random.randint(1,100) > mv.accuracy:
+                print(f"{actor.species}'s {mv.name} missed!")
+                return
+            dmg = compute_damage(actor, target, mv)
+            target.take_damage(dmg)
+            print(f"{actor.species} used {mv.name}! It dealt {dmg} damage.")
+            if mv.power > 0:
+                eff = type_multiplier(mv.type, target.types)
+                if eff >= 2:
+                    print("It's super effective!")
+                elif eff <= 0.5:
+                    print("It's not very effective.")
+        # Execute first
+        if first == "player":
+            do_action(player_pokemon, move, enemy_pokemon)
+            if enemy_pokemon.is_fainted():
+                return
+            do_action(enemy_pokemon, enemy_move, player_pokemon)
+        else:
+            do_action(enemy_pokemon, enemy_move, player_pokemon)
+            if player_pokemon.is_fainted():
+                return
+            do_action(player_pokemon, move, enemy_pokemon)
+
+    def open_bag(self, active_pokemon):
+        print("\n-- Bag --")
+        for i,(item,qty) in enumerate(self.player.bag.items(), start=1):
+            print(f"{i}) {item} x{qty}")
+        print(f"{len(self.player.bag)+1}) Cancel")
+        choice = choose_number("Choose item", 1, len(self.player.bag)+1)
+        if choice == len(self.player.bag)+1:
+            return
+        item = list(self.player.bag.keys())[choice-1]
+        if item == "Potion" and self.player.bag[item] > 0:
+            heal = min(20, active_pokemon.max_hp - active_pokemon.hp)
+            active_pokemon.hp += heal
+            self.player.bag[item] -= 1
+            print(f"Used Potion on {active_pokemon.species}, healed {heal} HP.")
+        else:
+            print("Nothing happened or item not implemented.")
+
+    def switch_pokemon(self, current):
+        print("\n-- Choose Pokemon --")
+        for i,p in enumerate(self.player.party, start=1):
+            status = "(FNT)" if p.is_fainted() else ""
+            active = "(Current)" if p is current else ""
+            print(f"{i}) {p.species} L{p.level} HP:{p.hp}/{p.max_hp} {status} {active}")
+        choice = choose_number("Switch to", 1, len(self.player.party))
+        chosen = self.player.party[choice-1]
+        if chosen.is_fainted():
+            print("You can't send out a fainted Pokemon!")
+            return current
+        if chosen is current:
+            print("You already have that Pokemon out.")
+            return current
+        print(f"You sent out {chosen.species}!")
+        return chosen
+
+# -------------------------
+# Game and Story
+# -------------------------
+
+class Story:
+    def __init__(self, game):
+        self.game = game
+
+    def intro(self):
+        print(f"Welcome to Unova — {self.game.player.name}!")
+        print("Year: After the fall of Team Plasma. New mysteries linger across the region.")
+        print("You're starting in Aspertia City, ready to explore.")
+        print("Your hometown professor gives a nod and a task: explore, make friends, and investigate new reports.")
+        input("\n(Press Enter to continue...)")
+
+    def first_choices(self):
+        # short scenario: choice-driven branching
+        print("\nA messenger arrives with a short note: 'Strange lights seen near Nuvema. Be careful.'")
+        print("Do you:")
+        print("1) Head straight to Nuvema to investigate.")
+        print("2) Visit the Academy first to gather info.")
+        print("3) Go to Route 1 and train your Pokemon.")
+        choice = choose_number("Choose your approach", 1, 3)
+        if choice == 1:
+            self.game.player.location = "Nuvema Town"
+            print("You set off directly to Nuvema Town.")
+        elif choice == 2:
+            self.game.player.location = "Aspertia City"
+            print("You stop by the Academy. A friendly researcher gives you a hint about 'shadows' near the coast.")
+        else:
+            self.game.player.location = "Route 1"
+            print("You choose to train first. The tall grass of Route 1 awaits.")
+
+# -------------------------
+# Main Game class
+# -------------------------
+
+class Game:
+    def __init__(self):
+        self.player: Optional[Player] = None
+        self.story = None
+
+    # -------------------------
+    # Save / Load
+    # -------------------------
+    def save(self):
+        data = {
+            "version": VERSION,
+            "player": {
+                "name": self.player.name,
+                "gender": self.player.gender,
+                "money": self.player.money,
+                "badges": self.player.badges,
+                "bag": self.player.bag,
+                "location": self.player.location,
+                "play_time_minutes": self.player.play_time_minutes,
+                "party": [
+                    {
+                        "species": p.species,
+                        "level": p.level,
+                        "hp": p.hp,
+                        "max_hp": p.max_hp,
+                        "atk": p.atk,
+                        "defense": p.defense,
+                        "sp_atk": p.sp_atk,
+                        "sp_def": p.sp_def,
+                        "speed": p.speed,
+                        "types": p.types,
+                        "moves": [m.name for m in p.moves],
+                        "status": p.status
+                    } for p in self.player.party
+                ]
+            }
+        }
+        with open(SAVE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"Game saved to {SAVE_FILE}.")
+
+    def load(self):
+        if not os.path.exists(SAVE_FILE):
+            print("No save file found.")
+            return False
+        with open(SAVE_FILE, "r") as f:
+            data = json.load(f)
+        p = data["player"]
+        party = []
+        for pd in p["party"]:
+            moves = [MOVESET.get(name, Move(name,40,100,10)) for name in pd.get("moves",[])]
+            poke = Pokemon(species=pd["species"], level=pd["level"], max_hp=pd["max_hp"], hp=pd["hp"],
+                           atk=pd["atk"], defense=pd["defense"], sp_atk=pd["sp_atk"], sp_def=pd["sp_def"], speed=pd["speed"], types=pd["types"], moves=moves, status=pd.get("status"))
+            party.append(poke)
+        self.player = Player(name=p["name"], gender=p["gender"], money=p.get("money",3000), badges=p.get("badges",[]), party=party, bag=p.get("bag",{}), location=p.get("location","Aspertia City"), play_time_minutes=p.get("play_time_minutes",0))
+        self.story = Story(self)
+        print(f"Loaded save for {self.player.name}.")
+        return True
+
+    # -------------------------
+    # New Game setup
+    # -------------------------
+    def new_game(self):
+        print("===== Pokémon: Black & White 3 — Shadows of Unova =====")
+        print("Create your Trainer:")
+        name = input("Enter your name: ").strip() or "Alex"
+        gender = ""
+        while gender not in ("M","F","Other"):
+            gender = input("Gender (M/F/Other): ").strip() or "M"
+        self.player = Player(name=name, gender=gender)
+        # Starter selection
+        print("\nProfessor Juniper style researcher offers you a starter Pokémon.")
+        starters = ["Snivy","Tepig","Oshawott"]
+        print("Choose your starter:")
+        for i,s in enumerate(starters, start=1):
+            print(f"{i}) {s}")
+        choice = choose_number("Starter", 1, len(starters))
+        starter_species = starters[choice-1]
+        starter = make_pokemon(starter_species, 5)
+        self.player.party.append(starter)
+        print(f"You received {starter_species}!")
+        self.story = Story(self)
+
+    # -------------------------
+    # Main game loop and actions
+    # -------------------------
+    def main_menu(self):
+        while True:
+            print("\n---- Main Menu ----")
+            print(f"Trainer: {self.player.name} Location: {self.player.location} Money: ${self.player.money}")
+            print("1) Explore")
+            print("2) Team (Party)")
+            print("3) Bag")
+            print("4) Save")
+            print("5) Save & Quit")
+            print("6) Quick Travel (Map)")
+            choice = choose_number("Choose",1,6)
+            if choice == 1:
+                self.explore()
+            elif choice == 2:
+                self.party_menu()
+            elif choice == 3:
+                self.bag_menu()
+            elif choice == 4:
+                self.save()
+            elif choice == 5:
+                self.save()
+                print("Goodbye!")
+                break
+            elif choice == 6:
+                self.travel_menu()
+
+    def travel_menu(self):
+        print("\n-- Map --")
+        keys = list(WORLD.keys())
+        for i,k in enumerate(keys, start=1):
+            print(f"{i}) {k}")
+        choice = choose_number("Travel to", 1, len(keys))
+        dest = keys[choice-1]
+        self.player.location = dest
+        print(f"You traveled to {dest}.")
+
+    def party_menu(self):
+        print("\n-- Party --")
+        for i,p in enumerate(self.player.party, start=1):
+            print(f"{i}) {p.species} L{p.level} HP:{p.hp}/{p.max_hp}")
+        print(f"{len(self.player.party)+1}) Back")
+        choice = choose_number("Choose",1,len(self.player.party)+1)
+        if choice == len(self.player.party)+1:
+            return
+        pkm = self.player.party[choice-1]
+        print(pkm.stat_line())
+        input("Press Enter to continue...")
+
+    def bag_menu(self):
+        print("\n-- Bag --")
+        for item,q in self.player.bag.items():
+            print(f"{item} x{q}")
+        input("Press Enter to continue...")
+
+    def explore(self):
+        loc = self.player.location
+        info = WORLD.get(loc, {"desc":"An unexplored area.", "exits":[]})
+        print(f"\nYou explore {loc}. {info['desc']}")
+        # Simple events: trainers, wild encounters, story beats
+        # If in Route 1: possible wild encounter or trainer
+        if loc == "Route 1":
+            print("You walk through the tall grass...")
+            if random.random() < 0.6:
+                # wild encounter
+                wild_species = random.choice(["Patrat","Purrloin","Pidove"])
+                wild_lv = random.randint(3,6)
+                wild = make_pokemon(wild_species, wild_lv)
+                print(f"A wild {wild_species} appeared (L{wild_lv})!")
+                battle = Battle(self.player, [wild], enemy_name="Wild " + wild_species, trainer_mode=False)
+                won = battle.start()
+                if won:
+                    # reward: small money and 30% chance to catch (simplified)
+                    self.player.money += 20
+                    if random.random() < 0.3:
+                        print(f"You caught {wild.species}!")
+                        self.player.party.append(wild)
+                    else:
+                        print("The Pokemon escaped.")
+            else:
+                # trainer encounter
+                print("A trainer approaches!")
+                tr_data = TRAINERS.get("Route 1 - Youngster")
+                enemy_party = [make_pokemon(species, lv) for (species, lv) in tr_data["party"]]
+                print(f"{tr_data['name']} wants to fight!")
+                battle = Battle(self.player, enemy_party, enemy_name=tr_data["name"], trainer_mode=True)
+                battle.start()
+        elif loc == "Nuvema Town":
+            print("You arrive at Nuvema Town. The coast looks calm but an uneasy feeling lingers.")
+            # A story beat: meet rival
+            if random.random() < 0.4 and not any(b=="MetCheren" for b in self.player.badges):
+                tr = TRAINERS.get("Nuvema - Rival")
+                enemy_party = [make_pokemon(species, lv) for (species, lv) in tr["party"]]
+                print(f"{tr['name']} challenges you!")
+                battle = Battle(self.player, enemy_party, enemy_name=tr['name'], trainer_mode=True)
+                won = battle.start()
+                if won:
+                    print(f"{tr['name']}: 'Nice battling! Keep going!'")
+                    # mark as met via badge trick
+                    self.player.badges.append("MetCheren")
+            else:
+                print("You explore the town and gather information on the strange lights.")
+        else:
+            print("Nothing of note here. Try traveling to different locations.")
+        input("\n(Press Enter to finish exploring...)")
+
+    def run(self):
+        # start menu: new / load
+        print(f"{'='*8} Pokémon: Black & White 3 — Shadows of Unova {'='*8}")
+        print(f"Version: {VERSION}\n")
+        print("1) New Game")
+        print("2) Load Game")
+        print("3) Quit")
+        choice = choose_number("Start", 1, 3)
+        if choice == 2:
+            if not self.load():
+                print("Starting a new game instead.")
+                self.new_game()
+        elif choice == 1:
+            self.new_game()
+        else:
+            print("Bye!")
+            return
+        # Intro story beat
+        self.story.intro()
+        self.story.first_choices()
+        # Main loop
+        self.main_menu()
+
+# -------------------------
+# Bootstrap
+# -------------------------
+def main():
+    random.seed()
+    game = Game()
+    game.run()
+
+if __name__ == "__main__":
+    main()
